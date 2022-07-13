@@ -1,0 +1,147 @@
+import base64
+from io import BytesIO
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+import math, os, sys, json
+
+def deqc( input_json ):
+    """
+    input_json:
+    {
+    'analysis_name': <ANALYSIS_NAME>
+    'input_file': <FILE_NAME>
+    'input_file_type': deseq2, ...
+    'output_dir': <LOCAL_OUTPUT_DIR>,
+    'gene_id_type': ensembl,...
+    'gene_id_column': 'gene_id'
+    'fold_change_cutoff': 2 (default)
+    'pvalue_cutoff': 0.05 (default)
+    'pvalue_column': 'padj' (default)
+    }
+    """
+    print('in deqc()')
+    de_label = input_json['analysis_name']
+    output_dir = input_json['output_dir']
+    fold_change_cutoff = float(input_json['fold_change_cutoff'])
+    pvalue_cutoff = float(input_json['pvalue_cutoff'])
+    pvalue_column = str(input_json['pvalue_column'])
+    gene_id_column = input_json['gene_id_column']
+    if input_json['input_file_type'].lower() == 'deseq2':
+        # can input more than one DE datafile, so input_file is a list
+        for fname in input_json['input_file']:
+            df = pd.read_csv(fname)
+            df.rename(columns = {'Unnamed: 0': gene_id_column}, inplace=True)
+            df.dropna(inplace=True)
+        
+            # get significant genes
+            df['signif'] = list(map(lambda x, y: 'DE_up' if x > math.log(fold_change_cutoff,2) and y < pvalue_cutoff \
+                                    else ('DE_down' if x < -1.0*math.log(fold_change_cutoff, 2)  and y < pvalue_cutoff \
+                                          else 'non-DE'), df['log2FoldChange'], df[pvalue_column]))
+            df['-10logp'] = list(map(lambda x: -1.0*math.log(x,10), df[pvalue_column]))
+            df_sig_up = df[df['signif']=='DE_up']
+            df_sig_down = df[df['signif']=='DE_down']
+            df_nonsig = df[df['signif']=='non-DE']
+
+            print('PVALUE COLUMN: {}'.format(str(pvalue_column)))
+            print('PVALUE LIST COLUMN: {}'.format(list(df_sig_up[pvalue_column])))
+            print('NP WHERE RESULT: {}'.format(str(np.where(df_sig_up[pvalue_column] < pvalue_cutoff, df_sig_up[gene_id_column], ''))))
+            df_sig_up['gene_name_label'] = np.where(df_sig_up[pvalue_column] < pvalue_cutoff, df_sig_up[gene_id_column], '')
+            df_sig_down['gene_name_label'] = np.where(df_sig_down[pvalue_column] < pvalue_cutoff, df_sig_down[gene_id_column], '')
+            
+            fig_volcano = go.Figure()
+            
+            # volcano plot
+            trace1 = go.Scatter(
+                x=df_sig_up['log2FoldChange'],
+                y=df_sig_up['-10logp'],
+                mode='markers+text',
+                name='Signif Up',
+                marker=dict(color='green'),
+                hovertext=list(df_sig_up[gene_id_column]),
+                text=df_sig_up['gene_name_label'],
+                textposition='top center',
+                textfont=dict(color='black', size=7),    
+            )
+            fig_volcano.add_trace(trace1)
+
+            trace2 = go.Scatter(
+                x=df_sig_down['log2FoldChange'],
+                y=df_sig_down['-10logp'],
+                mode='markers+text',
+                name='Signif Down',
+                marker=dict(color='red'),
+                hovertext=list(df_sig_down[gene_id_column]),
+                text=df_sig_down['gene_name_label'],
+                textposition='top center',
+                textfont=dict(color='black', size=7),    
+            )
+            fig_volcano.add_trace(trace2)
+
+            trace3 = go.Scatter(
+                x=df_nonsig['log2FoldChange'],
+                y=df_nonsig['-10logp'],
+                mode='markers',
+                name='Not Signif',
+                marker=dict(color='lightgrey'),
+                hovertext=list(df_nonsig[gene_id_column])
+            )
+            fig_volcano.add_trace(trace3)
+        
+            fig_volcano.update_layout(title='Volcano plot of differential expression', title_x=0.5, 
+                                      width=800, height=600, autosize=False,
+                                      xaxis_title='log2FoldChange', yaxis_title='-log10(p)')
+
+            with open(os.path.join(output_dir, '{}.deqc.volcano-and-ma-plots.html'.format(de_label)), 'a') as f:
+                f.write(fig_volcano.to_html(full_html=False, include_plotlyjs='cdn'))
+
+
+            # MA plot - eventually split into functions
+            fig_maplot = go.Figure()
+            
+            trace1 = go.Scatter(
+                y=df_sig_up['log2FoldChange'],
+                x=df_sig_up['baseMean'],
+                mode='markers+text',
+                name='Signif Up',
+                marker=dict(color='green'),
+                hovertext=list(df_sig_up[gene_id_column]),
+                text=df_sig_up['gene_name_label'],
+                textposition='top center',
+                textfont=dict(color='black', size=7),
+            )
+            fig_maplot.add_trace(trace1)
+
+            trace2 = go.Scatter(
+                y=df_sig_down['log2FoldChange'],
+                x=df_sig_down['baseMean'],
+                mode='markers+text',
+                name='Signif Down',
+                marker=dict(color='red'),
+                hovertext=list(df_sig_down[gene_id_column]),
+                text=df_sig_down['gene_name_label'],
+                textposition='top center',
+                textfont=dict(color='black', size=7),    
+            )
+            fig_maplot.add_trace(trace2)
+
+            trace3 = go.Scatter(
+                y=df_nonsig['log2FoldChange'],
+                x=df_nonsig['baseMean'],
+                mode='markers+text',
+                name='Not Signif',
+                marker=dict(color='lightgrey'),
+                hovertext=list(df_nonsig[gene_id_column]),
+            )
+            fig_maplot.add_trace(trace3)
+
+            fig_maplot.update_layout(title='MA plot of differential expression', title_x=0.5, 
+                                     width=800, height=600, autosize=False,
+                                     xaxis_title='Mean Expression', yaxis_title='log2FoldChange',
+                                     xaxis_type = "log")
+
+            with open(os.path.join(output_dir, '{}.deqc.volcano-and-ma-plots.html'.format(de_label)), 'a') as f:
+                f.write(fig_maplot.to_html(full_html=False, include_plotlyjs='cdn'))
+    
+    return
